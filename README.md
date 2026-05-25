@@ -1,6 +1,6 @@
 # 💼 ApplySmart AI: CV & Job Match Assistant
 
-## 📌 Overview
+# 📌 Overview
 
 ApplySmart AI is an interactive web application that helps job seekers compare their CV with a target job description and get role-specific resume improvements.
 
@@ -23,7 +23,7 @@ The tool is designed to give short, practical, copy-paste friendly CV suggestion
 
 Run the project here:
 
-👉 PASTE_YOUR_STREAMLIT_APP_LINK_HERE
+👉 https://applysmart-ai1.streamlit.app/
 
 ---
 
