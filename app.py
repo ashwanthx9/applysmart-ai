@@ -1,5 +1,6 @@
 import json
 import re
+import requests
 import streamlit as st
 from pypdf import PdfReader
 
@@ -7,6 +8,16 @@ try:
     import google.generativeai as genai
 except ImportError:
     genai = None
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
 
 
 # -------------------------------------------------
@@ -284,14 +295,7 @@ def calculate_basic_match(cv_text, job_text):
     return score, matched_skills, missing_skills, job_skills
 
 
-def get_ai_analysis(cv_text, job_text, api_key):
-    if genai is None:
-        raise RuntimeError("google-generativeai is not installed. Run: pip install google-generativeai")
-
-    genai.configure(api_key=api_key)
-
-    model = genai.GenerativeModel("gemini-2.5-flash")
-
+def build_resume_prompt(cv_text, job_text):
     prompt = f"""
 You are an expert ATS resume reviewer, CV writer, and career coach for Ireland-based job seekers.
 
@@ -375,10 +379,135 @@ JOB DESCRIPTION:
 {job_text[:14000]}
 \"\"\"
 """
+    return prompt
 
-    response = model.generate_content(prompt)
-    cleaned = clean_json_response(response.text)
+
+def parse_ai_response(text):
+    cleaned = clean_json_response(text)
     return json.loads(cleaned)
+
+
+# -------------------------------------------------
+# AI PROVIDER FUNCTIONS
+# -------------------------------------------------
+def get_gemini_analysis(cv_text, job_text, api_key, model_name):
+    if genai is None:
+        raise RuntimeError("google-generativeai is not installed. Run: pip install google-generativeai")
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name)
+
+    prompt = build_resume_prompt(cv_text, job_text)
+    response = model.generate_content(prompt)
+
+    return parse_ai_response(response.text)
+
+
+def get_openrouter_analysis(cv_text, job_text, api_key, model_name):
+    prompt = build_resume_prompt(cv_text, job_text)
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://applysmart-ai.streamlit.app",
+        "X-Title": "ApplySmart AI"
+    }
+
+    payload = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are an expert ATS resume reviewer. Return ONLY valid JSON. No markdown."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0.25
+    }
+
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=90
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(response.text)
+
+    data = response.json()
+    content = data["choices"][0]["message"]["content"]
+
+    return parse_ai_response(content)
+
+
+def get_openai_analysis(cv_text, job_text, api_key, model_name):
+    if OpenAI is None:
+        raise RuntimeError("openai package is not installed. Run: pip install openai")
+
+    client = OpenAI(api_key=api_key)
+    prompt = build_resume_prompt(cv_text, job_text)
+
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are an expert ATS resume reviewer. Return ONLY valid JSON. No markdown."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        temperature=0.25
+    )
+
+    content = response.choices[0].message.content
+    return parse_ai_response(content)
+
+
+def get_claude_analysis(cv_text, job_text, api_key, model_name):
+    if anthropic is None:
+        raise RuntimeError("anthropic package is not installed. Run: pip install anthropic")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    prompt = build_resume_prompt(cv_text, job_text)
+
+    response = client.messages.create(
+        model=model_name,
+        max_tokens=5000,
+        temperature=0.25,
+        system="You are an expert ATS resume reviewer. Return ONLY valid JSON. No markdown.",
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    )
+
+    content = response.content[0].text
+    return parse_ai_response(content)
+
+
+def get_ai_analysis(cv_text, job_text, provider, api_key, model_name):
+    if provider == "Gemini AI":
+        return get_gemini_analysis(cv_text, job_text, api_key, model_name)
+
+    if provider == "OpenRouter AI":
+        return get_openrouter_analysis(cv_text, job_text, api_key, model_name)
+
+    if provider == "OpenAI GPT":
+        return get_openai_analysis(cv_text, job_text, api_key, model_name)
+
+    if provider == "Claude AI":
+        return get_claude_analysis(cv_text, job_text, api_key, model_name)
+
+    raise RuntimeError("Invalid AI provider selected.")
 
 
 # -------------------------------------------------
@@ -394,7 +523,7 @@ def show_basic_report(score, matched_skills, missing_skills, job_skills):
 
     with col1:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        st.markdown('<div class="section-title"> Matching Skills</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">✅ Matching Skills</div>', unsafe_allow_html=True)
 
         if matched_skills:
             for skill in matched_skills:
@@ -544,6 +673,7 @@ Professional Skills: {copy_skills.get("professional_skills", "")}
 
 
 # -------------------------------------------------
+# -------------------------------------------------
 # HERO SECTION
 # -------------------------------------------------
 st.markdown(
@@ -553,12 +683,6 @@ st.markdown(
         <div class="sub-title">
             Upload your CV and paste a job description to get role-specific resume changes.
         </div>
-        <span class="tag">CV Match Score</span>
-        <span class="tag">Missing Skills</span>
-        <span class="tag">Resume Profile</span>
-        <span class="tag">Skills Section</span>
-        <span class="tag">Experience Points</span>
-        <span class="tag">Project Improvements</span>
     </div>
     """,
     unsafe_allow_html=True
@@ -573,16 +697,64 @@ with st.sidebar:
 
     analysis_mode = st.radio(
         "Choose analysis mode",
-        ["AI Analysis with Gemini", "Basic Analysis"]
+        [
+            "Gemini AI",
+            "OpenRouter AI",
+            "OpenAI GPT",
+            "Claude AI",
+            "Basic Analysis"
+        ]
     )
 
     api_key = ""
+    model_name = ""
 
-    if analysis_mode == "AI Analysis with Gemini":
+    if analysis_mode == "Gemini AI":
         api_key = st.text_input(
             "Paste your Gemini API key",
             type="password",
             help="Your key is used only for this session and is not saved."
+        )
+
+        model_name = st.text_input(
+            "Gemini model",
+            value="gemini-2.5-flash"
+        )
+
+    elif analysis_mode == "OpenRouter AI":
+        api_key = st.text_input(
+            "Paste your OpenRouter API key",
+            type="password",
+            help="Your key is used only for this session and is not saved."
+        )
+
+        model_name = st.text_input(
+            "OpenRouter model",
+            value="openrouter/free"
+        )
+
+    elif analysis_mode == "OpenAI GPT":
+        api_key = st.text_input(
+            "Paste your OpenAI API key",
+            type="password",
+            help="Your key is used only for this session and is not saved."
+        )
+
+        model_name = st.text_input(
+            "OpenAI model",
+            value="gpt-4.1-mini"
+        )
+
+    elif analysis_mode == "Claude AI":
+        api_key = st.text_input(
+            "Paste your Claude API key",
+            type="password",
+            help="Your key is used only for this session and is not saved."
+        )
+
+        model_name = st.text_input(
+            "Claude model",
+            value="claude-3-5-haiku-20241022"
         )
 
     st.info("AI mode gives resume-ready profile, skills, experience and project changes.")
@@ -627,8 +799,8 @@ if analyse_button:
         st.warning("Please upload your CV as a PDF.")
     elif job_text.strip() == "":
         st.warning("Please paste the job description.")
-    elif analysis_mode == "AI Analysis with Gemini" and api_key.strip() == "":
-        st.warning("Please paste your Gemini API key in the sidebar.")
+    elif analysis_mode != "Basic Analysis" and api_key.strip() == "":
+        st.warning(f"Please paste your {analysis_mode} API key in the sidebar.")
     else:
         with st.spinner("Reading CV and analysing against the job role..."):
             cv_text = extract_text_from_pdf(uploaded_cv)
@@ -643,8 +815,14 @@ if analyse_button:
 
             else:
                 try:
-                    with st.spinner("Generating resume-ready improvement sections..."):
-                        ai_report = get_ai_analysis(cv_text, job_text, api_key)
+                    with st.spinner(f"Generating resume-ready improvement sections using {analysis_mode}..."):
+                        ai_report = get_ai_analysis(
+                            cv_text=cv_text,
+                            job_text=job_text,
+                            provider=analysis_mode,
+                            api_key=api_key,
+                            model_name=model_name
+                        )
 
                     show_ai_report(ai_report)
 
